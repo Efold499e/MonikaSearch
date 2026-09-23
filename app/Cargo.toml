@@ -1,0 +1,45 @@
+[package]
+name = "monikasearch"
+version.workspace = true
+edition.workspace = true
+description = "MonikaSearch - 常驻后台的极速文件搜索"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+ep-core = { path = "../crates/ep-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+] }
+# COM 接口（IShellFolder/IContextMenu）需要 windows crate（windows-sys 只有裸 FFI）
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[[bin]]
+name = "monikasearch"
+path = "src/main.rs"
+
+[[bin]]
+name = "ctxhost"
+path = "src/ctxhost.rs"

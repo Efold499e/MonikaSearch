@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MonikaSearch</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <div id="searchbar">
+      <svg id="search-icon" viewBox="0 0 24 24" width="18" height="18">
+        <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2.2" />
+        <line x1="16.5" y1="16.5" x2="21" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+      </svg>
+      <input id="q" type="text" spellcheck="false"
+             placeholder="搜索文件名或路径…（自然语言以 ->ai 结尾）" autocomplete="off" />
+      <span id="mode-badge" class="hidden">AI</span>
+    </div>
+
+    <div id="chips">
+      <span id="type-chips"></span>
+      <span id="path-chip-slot"></span>
+    </div>
+
+    <div id="ai-banner" class="hidden"></div>
+    <div id="menu-note" class="hidden"></div>
+    <div id="status-bar" class="hidden"></div>
+
+    <div id="results"></div>
+
+    <div id="footer">
+      <span class="hints">Alt+E 呼出 · ↑↓ 选择 · Enter 打开 · Ctrl+Enter 定位 · Tab 限定文件夹 · Esc 隐藏</span>
+      <button id="gear" title="设置">⚙</button>
+    </div>
+
+    <div id="settings" class="hidden">
+      <h2>设置</h2>
+      <label>API 地址（OpenAI 兼容 chat/completions）
+        <input id="cfg-endpoint" placeholder="https://api.deepseek.com/chat/completions" />
+      </label>
+      <label>API Key
+        <input id="cfg-key" type="password" placeholder="sk-..." />
+      </label>
+      <label>模型
+        <input id="cfg-model" placeholder="deepseek-chat" />
+      </label>
+      <div class="row">
+        <label class="check"><input id="cfg-autostart" type="checkbox" /> 开机自启</label>
+        <label class="check"><input id="cfg-compat" type="checkbox" /> 右键兼容模式（改用内置五项菜单）</label>
+        <button id="btn-rebuild">重建索引</button>
+      </div>
+      <div id="cfg-menu-skip" class="stats"></div>
+      <button id="btn-clear-skip">清空跳过列表并重新检测</button>
+      <div id="cfg-stats" class="stats"></div>
+      <div id="ip-note" class="stats">非官方同人主题工具：“Monika”形象 © Team Salvato（DDLC），依其 Fan Content Guidelines 非商业使用，与官方无关联。索引与配置仅存本机；仅 AI 搜索会把输入语句发往你配置的接口（见 PRIVACY.md）。</div>
+      <button id="btn-close-settings">关闭</button>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

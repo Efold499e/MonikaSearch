@@ -1,0 +1,45 @@
+# MonikaSearch — 版权与许可声明（v0.3.0）
+
+Copyright (c) 2026 Efold499e（MonikaSearch 作者）
+
+## 一、本程序代码
+
+保留所有权利（All rights reserved）。允许任何人**免费**获取、使用、修改和再分发
+本程序（包括在个人与单位内部环境中部署），但：
+
+- 不得单独出售本程序本身，或将其并入付费安装包/付费合集；
+- 不得移除或篡改本声明与第三方署名。
+
+如需以开源许可证正式发布，推荐采用 MIT 或 Apache-2.0（与本程序依赖的许可一致），
+并在本文件顶部补上版权人真实署名即可，其余条款可整体替换。
+
+## 二、第三方代码组件
+
+以下主要组件均为宽松许可（MIT OR Apache-2.0 双许可），允许闭源分发，需保留署名：
+
+| 组件 | 许可 |
+| --- | --- |
+| Tauri 及官方插件（tauri、tauri-build、global-shortcut、single-instance） | MIT OR Apache-2.0 |
+| windows / windows-sys（Microsoft） | MIT OR Apache-2.0 |
+| serde / serde_json | MIT OR Apache-2.0 |
+| ureq、base64、image | MIT OR Apache-2.0 |
+
+完整传递依赖清单可用 `cargo install cargo-license && cargo license` 生成。
+上述组件版权归各自作者所有，本声明不改变、不覆盖其原始许可条款。
+
+## 三、主题素材与商标（重要，分发前必读）
+
+- “Monika” 形象出自 Team Salvato 的《Doki Doki Literature Club!》（DDLC）。
+  本程序中的壁纸与图标为**同人创作**，不是官方素材，也未提取/重打包游戏的
+  原始资源文件。
+- 依据 Team Salvato《Fan Content Guidelines》（https://teamsalvato.com/ip-guidelines），
+  同人内容必须：**非商业**、明确标注非官方、不与官方产生混淆。因此：
+  - 本程序**只能免费分发**（送人、网盘分享、开源发布均可）；
+  - **不得**用于销售、捆绑收费、广告变现或任何商业用途；
+  - 如将来需要商业发行，必须先整体替换主题素材（壁纸/图标/名称）。
+- 本程序与 Team Salvato 无任何关联，Team Salvato 未对本程序作任何认可或背书。
+
+## 四、无担保
+
+本程序按“现状”提供，不附带任何明示或默示的担保（包括但不限于适销性与特定用途
+适用性）。使用产生的风险由使用者自行承担。

@@ -1,0 +1,9 @@
+# MSVC 工具链路径固定（本机 VS BuildTools + D 盘 Windows SDK）
+# SDK 是从 NuGet 官方包解压的，注册表 KitsRoot10 与本 env 双保险。
+
+[env]
+LIB = "D:\\WinSDK-26100\\sdk\\Lib\\10.0.26100.0\\um\\x64;D:\\WinSDK-26100\\sdk\\Lib\\10.0.26100.0\\ucrt\\x64;C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\lib\\x64"
+INCLUDE = "D:\\WinSDK-26100\\sdk\\Include\\10.0.26100.0\\um;D:\\WinSDK-26100\\sdk\\Include\\10.0.26100.0\\ucrt;D:\\WinSDK-26100\\sdk\\Include\\10.0.26100.0\\shared;D:\\WinSDK-26100\\sdk\\Include\\10.0.26100.0\\winrt;C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\include"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/LIBPATH:D:\\WinSDK-26100\\sdk\\Lib\\10.0.26100.0\\um\\x64", "-C", "link-arg=/LIBPATH:D:\\WinSDK-26100\\sdk\\Lib\\10.0.26100.0\\ucrt\\x64"]
