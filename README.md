@@ -50,7 +50,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/make-dist.ps1       
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/make-dist.ps1 -SkipNsis  # 只要便携 zip
 ```
 
-快速开始：
 
 - `dist/MonikaSearch-<版本>-portable.zip` —— 绿色便携版：`monikasearch.exe` +
   `ctxhost.exe`（右键菜单宿主，必须与主程序同目录）+ `ep-mcp.exe` + LICENSE +
