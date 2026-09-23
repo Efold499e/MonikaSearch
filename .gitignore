@@ -1,0 +1,11 @@
+/target
+node_modules
+*.tmp
+out/
+dist/
+app/binaries/
+app/gen/
+.mimosa/
+.v2c/
+.video_agent/
+*.log

@@ -1,0 +1,260 @@
+:root {
+  --bg: rgba(30, 32, 38, 0.96);
+  --bg-solid: #1e2026;
+  --input-bg: rgba(255, 255, 255, 0.07);
+  --border: rgba(255, 255, 255, 0.09);
+  --text: #e8eaf0;
+  --text-dim: #9aa0ae;
+  --accent: #5fc46f;
+  --accent-soft: rgba(95, 196, 111, 0.16);
+  --danger: #ff6b6b;
+  --row-hover: rgba(255, 255, 255, 0.06);
+  --row-sel: var(--accent-soft);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  background: transparent;
+  font-family: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  color: var(--text);
+  overflow: hidden;
+  height: 100vh;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background:
+    linear-gradient(180deg, rgba(16, 22, 16, 0.78) 0%, rgba(12, 18, 12, 0.88) 100%),
+    url('wallpaper.jpg') center 30% / cover no-repeat;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+}
+
+/* ── 搜索栏 ── */
+#searchbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 14px 6px;
+  padding: 10px 14px;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+#search-icon { color: var(--text-dim); flex: none; }
+#q {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 17px;
+  font-family: inherit;
+}
+#q::placeholder { color: var(--text-dim); opacity: 0.75; }
+
+#mode-badge {
+  flex: none;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #7c5cff, #4f8cff);
+  padding: 2px 8px;
+  border-radius: 6px;
+  letter-spacing: 0.5px;
+}
+
+/* ── chips ── */
+#chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 14px 8px;
+  min-height: 26px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.12s;
+}
+.chip:hover { color: var(--text); border-color: rgba(255,255,255,0.2); }
+.chip.active {
+  color: #fff;
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.chip.path-chip { color: #ffd479; border-color: rgba(255, 212, 121, 0.4); background: rgba(255, 212, 121, 0.1); }
+.chip .x { margin-left: 2px; opacity: 0.7; }
+.chip .x:hover { opacity: 1; }
+
+/* ── AI 横幅 / 右键菜单诊断提示 ── */
+#ai-banner, #menu-note {
+  margin: 0 14px 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: #dcd3ff;
+  background: linear-gradient(135deg, rgba(124, 92, 255, 0.14), rgba(79, 140, 255, 0.14));
+  border: 1px solid rgba(124, 92, 255, 0.35);
+  border-radius: 8px;
+}
+#ai-banner.error, #menu-note.error { color: #ffb3b3; border-color: rgba(255, 107, 107, 0.4); background: rgba(255, 107, 107, 0.08); }
+#ai-banner .kw { display: inline-block; margin: 2px 4px 0 0; padding: 1px 7px; font-size: 11px; border-radius: 5px; background: rgba(255,255,255,0.1); }
+
+/* ── 状态栏（索引中） ── */
+#status-bar {
+  margin: 0 14px 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+#status-bar .dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent); margin-right: 8px;
+  animation: pulse 1.2s infinite;
+}
+@keyframes pulse { 50% { opacity: 0.3; } }
+
+/* ── 结果列表 ── */
+#results {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0 6px;
+  padding: 0 6px;
+}
+#results::-webkit-scrollbar { width: 8px; }
+#results::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 4px; }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.row:hover { background: var(--row-hover); }
+.row.sel { background: var(--row-sel); outline: 1px solid rgba(95, 196, 111, 0.25); }
+.row .ico { flex: none; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; font-size: 15px; }
+.row .ico img { width: 22px; height: 22px; object-fit: contain; image-rendering: auto; }
+.row .ico img.thumb { width: 26px; height: 26px; border-radius: 4px; box-shadow: 0 0 0 1px rgba(255,255,255,0.18); background: rgba(255,255,255,0.9); }
+.row .mid { flex: 1; min-width: 0; }
+.row .name {
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row .name b { color: var(--accent); font-weight: 600; }
+.row .path {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+}
+.row .date { flex: none; font-size: 11px; color: var(--text-dim); }
+.empty-tip { padding: 40px 0; text-align: center; color: var(--text-dim); font-size: 14px; }
+
+/* ── footer ── */
+#footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+#gear {
+  background: none; border: none; color: var(--text-dim);
+  font-size: 16px; cursor: pointer; padding: 2px 6px; border-radius: 6px;
+}
+#gear:hover { color: var(--text); background: var(--row-hover); }
+
+/* ── 设置面板 ── */
+#settings {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-solid);
+  padding: 26px 30px;
+  overflow-y: auto;
+  z-index: 10;
+}
+#settings h2 { font-size: 18px; margin-bottom: 18px; }
+#settings label { display: block; font-size: 12.5px; color: var(--text-dim); margin-bottom: 14px; }
+#settings input[type="text"], #settings input[type="password"], #settings input:not([type]) {
+  display: block;
+  width: 100%;
+  margin-top: 5px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+}
+#settings input:focus { border-color: var(--accent); }
+#settings .row { display: flex; align-items: center; gap: 14px; margin-top: 6px; }
+#settings .check { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 13px; margin: 0; }
+#settings .check input { width: auto; }
+#settings .stats { font-size: 12px; color: var(--text-dim); margin: 16px 0; line-height: 1.8; }
+#settings button {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+#settings button:hover { border-color: var(--accent); }
+#settings #btn-close-settings { margin-top: 10px; }
+
+.hidden { display: none !important; }
+
+/* ── 回退右键菜单（shell 扩展崩溃时的内置菜单） ── */
+#fallback-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 180px;
+  padding: 5px;
+  background: rgba(34, 38, 34, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55);
+}
+.fb-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 12px;
+  font-size: 13px;
+  border-radius: 7px;
+  cursor: pointer;
+  user-select: none;
+}
+.fb-item:hover { background: var(--accent-soft); }
+.fb-ico { width: 18px; text-align: center; }
+.fb-sep { height: 1px; margin: 4px 8px; background: rgba(255, 255, 255, 0.12); }
