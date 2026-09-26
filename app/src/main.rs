@@ -21,9 +21,18 @@ use state::{AppState, Status};
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // 二次启动：唤起已有实例的搜索窗口
-            show_main(app);
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // 二次启动：唤起已有实例的搜索窗口；带路径参数（右键菜单）则限定搜索范围
+            match launch_path_from_args(&args) {
+                Some(lp) => {
+                    if let Some(st) = app.try_state::<state::AppState>() {
+                        *st.launch_path.lock().unwrap() = Some(lp.clone());
+                    }
+                    show_main(app);
+                    let _ = app.emit("open-with-path", lp);
+                }
+                None => show_main(app),
+            }
         }))        .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -51,7 +60,8 @@ fn main() {
             commands::get_menu_skip,
             commands::clear_menu_skip,
             commands::show_properties,
-            commands::delete_path
+            commands::delete_path,
+            commands::take_launch_path
         ])
         .on_window_event(|window, event| {
             // 点关闭 = 隐藏，进程留在托盘
@@ -83,7 +93,20 @@ fn main() {
                 config: Mutex::new(config),
                 data_dir: data_dir.clone(),
                 icons: Mutex::new(std::collections::HashMap::new()),
+                launch_path: Mutex::new(None),
             });
+
+            // 冷启动带路径参数（右键"用 MonikaSearch 搜索"且实例未运行）：
+            // 显示窗口并通知前端限定目录/按文件名搜索
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            if let Some(lp) = launch_path_from_args(&args) {
+                if let Some(st) = app.try_state::<state::AppState>() {
+                    *st.launch_path.lock().unwrap() = Some(lp.clone());
+                }
+                let handle = app.handle();
+                show_main(handle);
+                let _ = handle.emit("open-with-path", lp);
+            }
 
             // 后台引擎线程
             std::thread::Builder::new()
@@ -150,6 +173,25 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+/// 从启动参数里找"存在的路径"（跳过 -- 开关和 exe 自身），用于右键菜单启动
+fn launch_path_from_args(args: &[String]) -> Option<state::LaunchPath> {
+    let exe = std::env::current_exe().ok();
+    args.iter()
+        .filter(|a| !a.is_empty() && !a.starts_with('-'))
+        .find(|a| {
+            if let Some(e) = &exe {
+                if a.eq_ignore_ascii_case(&e.to_string_lossy()) {
+                    return false;
+                }
+            }
+            std::path::Path::new(a).exists()
+        })
+        .map(|p| {
+            let is_dir = std::path::Path::new(p).is_dir();
+            state::LaunchPath { path: p.clone(), is_dir }
+        })
 }
 
 fn toggle_main(app: &AppHandle) {

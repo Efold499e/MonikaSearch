@@ -560,6 +560,25 @@ listen('window-shown', () => {
 });
 listen('open-settings', openSettings);
 
+// ── 右键"用 MonikaSearch 搜索"：目录 → 限定范围；文件 → 按文件名搜 ──
+function applyLaunchPath(lp) {
+  if (!lp || !lp.path) return;
+  if (lp.is_dir) {
+    const seg = lp.path.split('\\').filter(Boolean).pop() || lp.path;
+    pathPrefix = {
+      display: seg + '\\',
+      value: lp.path.endsWith('\\') ? lp.path : lp.path + '\\',
+    };
+  } else {
+    input.value = lp.path.split('\\').pop();
+  }
+  input.focus();
+  input.select();
+  doSearch();
+}
+listen('open-with-path', (ev) => applyLaunchPath(ev.payload));
+invoke('take_launch_path').then(applyLaunchPath).catch(() => {});
+
 // 初始渲染
 renderChips();
 doSearch();

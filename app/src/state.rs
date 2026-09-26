@@ -57,6 +57,13 @@ impl Status {
     }
 }
 
+/// 右键"用 MonikaSearch 搜索"传入的路径（is_dir=true 限定目录，否则按文件名搜索）
+#[derive(Clone, serde::Serialize)]
+pub struct LaunchPath {
+    pub path: String,
+    pub is_dir: bool,
+}
+
 pub struct AppState {
     pub engine: Arc<RwLock<Engine>>,
     pub status: Arc<Status>,
@@ -65,6 +72,8 @@ pub struct AppState {
     pub data_dir: PathBuf,
     /// 扩展名 -> 图标 data URL 缓存
     pub icons: Mutex<std::collections::HashMap<String, String>>,
+    /// 启动参数携带的搜索路径（冷启动时事件可能早于前端就绪，先存这里由前端取走）
+    pub launch_path: Mutex<Option<LaunchPath>>,
 }
 
 impl AppState {

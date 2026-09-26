@@ -178,6 +178,12 @@ pub fn hide_window(app: AppHandle) {
     }
 }
 
+/// 前端就绪后取走启动参数携带的搜索路径（一次性）
+#[tauri::command]
+pub fn take_launch_path(state: State<AppState>) -> Option<crate::state::LaunchPath> {
+    state.launch_path.lock().unwrap().take()
+}
+
 #[tauri::command]
 pub fn get_config(state: State<AppState>) -> Config {
     state.config.lock().unwrap().clone()

@@ -45,6 +45,9 @@ Copy-Item LICENSE $stage
 Copy-Item PRIVACY.md $stage
 Copy-Item README.md $stage
 Copy-Item scripts\add-startmenu-shortcut.ps1 $stage
+Copy-Item scripts\context-menu.ps1 $stage
+Copy-Item scripts\install-context-menu.cmd $stage
+Copy-Item scripts\remove-context-menu.cmd $stage
 Compress-Archive -Path $stage -DestinationPath "dist\MonikaSearch-$ver-portable.zip" -Force
 Write-Output "portable zip: dist\MonikaSearch-$ver-portable.zip"
 
