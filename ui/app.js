@@ -29,6 +29,8 @@ let pathPrefix = null;   // { display, value }
 let debounceTimer = null;
 let engineReady = false;
 let aiBusy = false;
+// 搜索序号：命令已异步化，先发的可能后到，旧结果必须丢弃
+let searchSeq = 0;
 
 const $ = (id) => document.getElementById(id);
 const input = $('q');
@@ -66,6 +68,7 @@ async function ensureIcons(list) {
       if (url) iconCache[e] = url;
     } catch (err) { /* ignore */ }
   }));
+  return exts.size;
 }
 
 function rowIcon(hit) {
@@ -79,18 +82,27 @@ function rowIcon(hit) {
   return iconFor(hit);
 }
 
-async function loadThumbs(list) {
-  for (const h of list.slice(0, 60)) {
-    if (h.is_dir) continue;
-    const e = extOf(h.name);
-    if (!IMAGE_EXTS.has(e) || thumbCache.has(h.path)) continue;
-    if (thumbCache.size > 300) thumbCache.clear();
-    try {
-      const url = await invoke('image_thumb', { path: h.path });
-      if (url) { thumbCache.set(h.path, url); }
-    } catch (err) { thumbCache.set(h.path, ''); }
-  }
-  if (list.some(h => IMAGE_EXTS.has(extOf(h.name)))) render();
+async function loadThumbs(list, seq) {
+  const targets = [];
+  list.slice(0, 60).forEach((h, i) => {
+    if (!h.is_dir && IMAGE_EXTS.has(extOf(h.name)) && !thumbCache.has(h.path)) targets.push(i);
+  });
+  if (!targets.length) return;
+  // 并行取缩略图（后端也已线程池化），就绪一张就地替换一张，不再整表重渲染
+  let next = 0;
+  const workers = Array.from({ length: Math.min(6, targets.length) }, async () => {
+    while (seq === searchSeq && next < targets.length) {
+      const i = targets[next++];
+      const h = list[i];
+      if (thumbCache.size > 300) thumbCache.clear();
+      try {
+        const url = await invoke('image_thumb', { path: h.path });
+        thumbCache.set(h.path, url || '');
+        if (url && seq === searchSeq) patchRowIcon(i);
+      } catch (err) { thumbCache.set(h.path, ''); }
+    }
+  });
+  await Promise.all(workers);
 }
 
 function fmtDate(unix) {
@@ -124,14 +136,18 @@ function buildQuery() {
 
 async function doSearch() {
   if (isAiMode() || aiBusy) { renderChips(); return; }
+  const seq = ++searchSeq;
   const q = buildQuery();
   try {
-    hits = await invoke('search', { q });
+    const r = await invoke('search', { q });
+    if (seq !== searchSeq) return;
+    hits = r;
     sel = hits.length ? 0 : -1;
     render();
-    await ensureIcons(hits);
-    render();
-    loadThumbs(hits);
+    const fresh = await ensureIcons(hits);
+    if (seq !== searchSeq) return;
+    if (fresh > 0) patchAllIcons();
+    loadThumbs(hits, seq);
   } catch (e) {
     console.error(e);
   }
@@ -142,20 +158,24 @@ async function doAiSearch() {
   const text = aiText();
   if (!text) return;
   aiBusy = true;
+  const seq = ++searchSeq;
   aiBanner.classList.remove('hidden', 'error');
   aiBanner.textContent = `⏳ AI 正在理解「${text}」…`;
   try {
     const r = await invoke('ai_search', { text });
+    if (seq !== searchSeq) { aiBusy = false; return; }
     hits = r.hits;
     sel = hits.length ? 0 : -1;
     const kws = r.keywords.map(k => `<span class="kw">${esc(k)}</span>`).join('');
     const days = r.days ? `<span class="kw">近 ${r.days} 天</span>` : '';
     aiBanner.innerHTML = `🤖 ${esc(r.explain || '已转换为搜索条件')}${kws}${days}`;
     render();
-    await ensureIcons(hits);
-    render();
-    loadThumbs(hits);
+    const fresh = await ensureIcons(hits);
+    if (seq !== searchSeq) { aiBusy = false; return; }
+    if (fresh > 0) patchAllIcons();
+    loadThumbs(hits, seq);
   } catch (e) {
+    if (seq !== searchSeq) { aiBusy = false; return; }
     aiBanner.classList.add('error');
     aiBanner.textContent = `⚠ ${e}`;
     hits = []; sel = -1;
@@ -220,6 +240,33 @@ function scrollSel() {
   if (el) el.scrollIntoView({ block: 'nearest' });
 }
 
+// 就地更新选中行：方向键不再整表 innerHTML 重建（200 行的重建是可感知的卡顿）
+function setSel(i) {
+  if (i === sel) { scrollSel(); return; }
+  const prev = resultsEl.querySelector(`.row[data-i="${sel}"]`);
+  if (prev) prev.classList.remove('sel');
+  sel = i;
+  const el = resultsEl.querySelector(`.row[data-i="${i}"]`);
+  if (el) {
+    el.classList.add('sel');
+    el.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+// 图标缓存就绪后只替换 .ico 节点，不重建整表
+function patchAllIcons() {
+  for (const row of resultsEl.querySelectorAll('.row')) {
+    const h = hits[+row.dataset.i];
+    if (h) patchRowIcon(+row.dataset.i);
+  }
+}
+
+function patchRowIcon(i) {
+  const h = hits[i];
+  const ico = resultsEl.querySelector(`.row[data-i="${i}"] .ico`);
+  if (h && ico) ico.innerHTML = rowIcon(h);
+}
+
 // ── 事件 ──
 input.addEventListener('input', () => {
   if (!isAiMode()) aiBanner.classList.add('hidden');
@@ -231,9 +278,7 @@ input.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
     if (!hits.length) return;
-    sel = e.key === 'ArrowDown' ? Math.min(sel + 1, hits.length - 1) : Math.max(sel - 1, 0);
-    render();
-    scrollSel();
+    setSel(e.key === 'ArrowDown' ? Math.min(sel + 1, hits.length - 1) : Math.max(sel - 1, 0));
   } else if (e.key === 'Enter') {
     e.preventDefault();
     if (isAiMode()) { if (!aiBusy) doAiSearch(); return; }
@@ -395,11 +440,8 @@ resultsEl.addEventListener('contextmenu', (e) => {
   e.preventDefault();
   const row = e.target.closest('.row');
   if (!row) return;
-  const i = +row.dataset.i;
-  sel = i;
-  render();
-  scrollSel();
-  openContextMenuFor(hits[i].path);
+  setSel(+row.dataset.i);
+  openContextMenuFor(hits[sel].path);
 });
 // 键盘菜单键 / Shift+F10：对选中项弹菜单
 input.addEventListener('keyup', (e) => {

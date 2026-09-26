@@ -20,6 +20,10 @@ pub struct Entry {
     pub is_dir: bool,
     pub last_write: i64,  // unix 秒
     pub path_lower: String, // 全小写完整路径（含盘符），搜索用
+    /// path_lower 里最后一段（文件名段）的起始字节偏移，
+    /// 预计算后查询免做 rsplit（与 path_lower 同步赋值，仅在 path_lower 非空时有效）
+    #[serde(skip)]
+    pub name_off: u32,
     #[serde(skip)]
     pub dead: bool,       // 墓碑：USN 删除后标记，避免索引位移
 }
@@ -44,6 +48,9 @@ pub struct Engine {
     by_frn: HashMap<(u8, u64), u32>,
     /// (vol, parent_frn) -> 子项 entries 下标
     children: HashMap<(u8, u64), Vec<u32>>,
+    /// 存活条目 / 目录计数（增量维护，全量扫描与缓存加载后重算校准）
+    alive_count: u64,
+    dir_count: u64,
 }
 
 const PATH_SER_VERSION: u32 = 1;
@@ -93,6 +100,8 @@ impl Engine {
             entries: Vec::new(),
             by_frn: HashMap::new(),
             children: HashMap::new(),
+            alive_count: 0,
+            dir_count: 0,
         }
     }
 
@@ -134,6 +143,7 @@ impl Engine {
         self.volumes[vol_idx].journal_id = journal.usn_journal_id;
         self.volumes[vol_idx].next_usn = journal.next_usn;
         self.rebuild_all_paths();
+        self.recount();
         // 扫描期间可能有新变更落在本轮 journal 游标之前，回退一点重新追
         Ok(())
     }
@@ -145,7 +155,7 @@ impl Engine {
             let idx = self.entries.len() as u32;
             self.entries.push(Entry {
                 vol, frn, parent_frn, name, is_dir, last_write: ts,
-                path_lower: String::new(), dead: false,
+                path_lower: String::new(), name_off: 0, dead: false,
             });
             self.by_frn.insert((vol, frn), idx);
             let ck = self.children.entry((vol, parent_frn)).or_default();
@@ -192,25 +202,31 @@ impl Engine {
                 .map(|i| (i, prefix_lower.clone()))
                 .collect();
             while let Some((idx, prefix)) = stack.pop() {
-                let (name_lower, is_dir, parent_display) = {
+                let (name_lower, is_dir, my_frn) = {
                     let e = &self.entries[idx as usize];
-                    (e.name.to_lowercase(), e.is_dir, e.parent_frn)
+                    (e.name.to_lowercase(), e.is_dir, e.frn)
                 };
-                let _ = parent_display;
+                if my_frn == root_frn {
+                    // 根目录自引用（parent == frn）：不生成路径也不展开，
+                    // 否则它会在自己的 children 里被反复入栈死循环
+                    continue;
+                }
                 let path = if prefix.ends_with('\\') {
                     format!("{prefix}{name_lower}")
                 } else {
                     format!("{prefix}\\{name_lower}")
                 };
                 if is_dir {
-                    if let Some(kids) = self.children.get(&(vol, self.entries[idx as usize].frn)) {
+                    if let Some(kids) = self.children.get(&(vol, my_frn)) {
                         let child_prefix = format!("{path}\\");
                         for &k in kids {
                             stack.push((k, child_prefix.clone()));
                         }
                     }
                 }
-                self.entries[idx as usize].path_lower = path;
+                let e = &mut self.entries[idx as usize];
+                e.name_off = (path.len() - name_lower.len()) as u32;
+                e.path_lower = path;
             }
         }
     }
@@ -242,7 +258,7 @@ impl Engine {
             .map(|e| Entry {
                 vol: e.vol, frn: e.frn, parent_frn: e.parent_frn, name: e.name,
                 is_dir: e.is_dir, last_write: e.last_write, path_lower: String::new(),
-                dead: false,
+                name_off: 0, dead: false,
             })
             .collect();
         // 重建 by_frn 索引（children 由 rebuild_all_paths 重建）
@@ -251,6 +267,7 @@ impl Engine {
             self.by_frn.insert((e.vol, e.frn), i as u32);
         }
         self.rebuild_all_paths();
+        self.recount();
         true
     }
 
@@ -333,7 +350,14 @@ impl Engine {
         }
         for i in to_kill {
             let e = &mut self.entries[i as usize];
+            if e.dead {
+                continue;
+            }
             e.dead = true;
+            self.alive_count -= 1;
+            if e.is_dir {
+                self.dir_count -= 1;
+            }
             self.by_frn.remove(&(e.vol, e.frn));
             if let Some(v) = self.children.get_mut(&(e.vol, e.parent_frn)) {
                 v.retain(|&x| x != i);
@@ -346,11 +370,21 @@ impl Engine {
             let e = &mut self.entries[idx as usize];
             let old_parent = e.parent_frn;
             let old_name_lower = e.name.to_lowercase();
+            let was_dead = e.dead;
+            let was_dir = e.is_dir;
             e.parent_frn = parent_frn;
             e.name = name;
             e.is_dir = is_dir;
             e.last_write = ts;
             e.dead = false;
+            if was_dead {
+                self.alive_count += 1;
+                if is_dir {
+                    self.dir_count += 1;
+                }
+            } else if was_dir != is_dir {
+                if is_dir { self.dir_count += 1 } else { self.dir_count -= 1 }
+            }
             if old_parent != parent_frn {
                 if let Some(v) = self.children.get_mut(&(vol, old_parent)) {
                     v.retain(|&x| x != idx);
@@ -370,10 +404,14 @@ impl Engine {
         let idx = self.entries.len() as u32;
         self.entries.push(Entry {
             vol, frn, parent_frn, name, is_dir, last_write: ts,
-            path_lower: String::new(), dead: false,
+            path_lower: String::new(), name_off: 0, dead: false,
         });
         self.by_frn.insert((vol, frn), idx);
         self.children.entry((vol, parent_frn)).or_default().push(idx);
+        self.alive_count += 1;
+        if is_dir {
+            self.dir_count += 1;
+        }
         self.rebuild_subtree_paths(vol, frn);
     }
 
@@ -401,6 +439,10 @@ impl Engine {
                 let e = &self.entries[i as usize];
                 (e.name.to_lowercase(), e.is_dir, e.frn)
             };
+            if my_frn == root_frn {
+                // 根目录自引用防护，同 rebuild_all_paths
+                continue;
+            }
             let path = if prefix.ends_with('\\') {
                 format!("{prefix}{name_lower}")
             } else {
@@ -414,11 +456,14 @@ impl Engine {
                     }
                 }
             }
-            self.entries[i as usize].path_lower = path;
+            let e = &mut self.entries[i as usize];
+            e.name_off = (path.len() - name_lower.len()) as u32;
+            e.path_lower = path;
         }
     }
 
-    pub fn stats(&self) -> EngineStats {
+    /// 全量重算存活/目录计数（全量扫描与缓存加载后校准增量计数器）
+    fn recount(&mut self) {
         let mut alive = 0u64;
         let mut dirs = 0u64;
         for e in &self.entries {
@@ -429,7 +474,12 @@ impl Engine {
                 }
             }
         }
-        EngineStats { total_alive: alive, total_dirs: dirs }
+        self.alive_count = alive;
+        self.dir_count = dirs;
+    }
+
+    pub fn stats(&self) -> EngineStats {
+        EngineStats { total_alive: self.alive_count, total_dirs: self.dir_count }
     }
 
     /// 原始大小写完整路径（按需重建，仅用于结果展示）
@@ -472,6 +522,7 @@ impl Engine {
         });
         let limit = if q.limit == 0 { 500 } else { q.limit };
         let empty = text.is_empty();
+        let name_only = q.name_only;
 
         let mut scored: Vec<(i32, u32)> = self
             .entries
@@ -498,7 +549,7 @@ impl Engine {
                 if e.is_dir {
                     return false;
                 }
-                let name_lower = e.path_lower.rsplit('\\').next().unwrap_or("");
+                let name_lower = &e.path_lower[e.name_off as usize..];
                 match name_lower.rfind('.') {
                     Some(d) if d + 1 < name_lower.len() => {
                         exts.iter().any(|x| &name_lower[d + 1..] == x.as_str())
@@ -518,34 +569,41 @@ impl Engine {
                 if empty {
                     return Some((3, i as u32));
                 }
-                let name_seg = e.path_lower.rsplit('\\').next().unwrap_or("");
-                if q.name_only {
-                    if let Some(pos) = name_seg.find(&text) {
-                        return Some((if pos == 0 { 0 } else { 1 }, i as u32));
-                    }
-                    return None;
+                // 文件名段优先匹配：短串上的 find 比全路径扫描快得多，
+                // 且文件名命中即无需再扫整条路径
+                let name_seg = &e.path_lower[e.name_off as usize..];
+                let name_pos = name_seg.find(&text);
+                if name_only {
+                    return name_pos.map(|pos| (if pos == 0 { 0 } else { 1 }, i as u32));
                 }
-                if let Some(pos) = e.path_lower.find(&text) {
-                    let score = if pos as usize >= e.path_lower.len() - name_seg.len()
-                        && name_seg.starts_with(&text) { 0 }
-                        else if e.path_lower.ends_with(name_seg) && name_seg.contains(&text) { 1 }
-                        else { 2 };
+                if name_pos.is_some() || e.path_lower.contains(&text) {
+                    let score = match name_pos {
+                        Some(0) => 0, // 文件名以关键词开头
+                        Some(_) => 1, // 文件名包含关键词
+                        None => 2,    // 仅路径其余部分命中
+                    };
                     return Some((score, i as u32));
                 }
                 None
             })
             .collect();
 
-        // 排序：分数 → 路径短 → 时间新
-        scored.sort_by(|a, b| {
+        // 只取前 limit 条：select_nth O(n) 划分出 top-K，再对 K 条排序，
+        // 避免空查询/短查询把几十万命中整段 O(n log n) 排序；
+        // 平分时按下标决出稳定顺序，与全量稳定排序一致
+        let cmp = |a: &(i32, u32), b: &(i32, u32)| {
             let ea = &self.entries[a.1 as usize];
             let eb = &self.entries[b.1 as usize];
             a.0.cmp(&b.0)
                 .then(ea.path_lower.len().cmp(&eb.path_lower.len()))
                 .then(eb.last_write.cmp(&ea.last_write))
-        });
-        scored.truncate(limit);
-
+                .then(a.1.cmp(&b.1))
+        };
+        if scored.len() > limit {
+            scored.select_nth_unstable_by(limit - 1, cmp);
+            scored.truncate(limit);
+        }
+        scored.sort_unstable_by(cmp);
         scored
             .iter()
             .map(|&(_, i)| {
@@ -558,5 +616,119 @@ impl Engine {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_engine() -> Engine {
+        let mut eg = Engine::empty();
+        eg.volumes.push(VolumeState { letter: 'C', root_frn: 1, journal_id: 1, next_usn: 0 });
+        let rows: Vec<(u64, u64, &str, bool)> = vec![
+            (1, 1, "C:", true),            // 卷根
+            (2, 1, "Docs", true),
+            (3, 2, "report.txt", false),
+            (4, 1, "docs_backup", true),
+            (5, 4, "notes.md", false),
+        ];
+        for (i, (frn, parent, name, is_dir)) in rows.into_iter().enumerate() {
+            eg.entries.push(Entry {
+                vol: 0, frn, parent_frn: parent, name: name.into(), is_dir,
+                last_write: 100 + i as i64, path_lower: String::new(), name_off: 0, dead: false,
+            });
+            eg.by_frn.insert((0, frn), i as u32);
+        }
+        eg.rebuild_all_paths();
+        eg.recount();
+        eg
+    }
+
+    fn q(text: &str) -> SearchQuery {
+        SearchQuery { text: text.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn scoring_name_first_then_path() {
+        let eg = test_engine();
+        let hits = eg.search(&q("docs"));
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["C:\\Docs", "C:\\docs_backup", "C:\\Docs\\report.txt", "C:\\docs_backup\\notes.md"]
+        );
+    }
+
+    #[test]
+    fn name_prefix_ranks_first() {
+        let eg = test_engine();
+        let hits = eg.search(&q("report"));
+        assert_eq!(hits[0].path, "C:\\Docs\\report.txt");
+        let name_hits = eg.search(&SearchQuery { text: "report".into(), name_only: true, ..Default::default() });
+        assert_eq!(name_hits.len(), 1);
+    }
+
+    #[test]
+    fn filters_kind_exts_limit() {
+        let eg = test_engine();
+        let dirs = eg.search(&SearchQuery { text: String::new(), kind: "dir".into(), ..Default::default() });
+        assert_eq!(dirs.len(), 2); // 根目录无路径，不参与
+        let txt = eg.search(&SearchQuery { text: String::new(), exts: vec!["txt".into()], ..Default::default() });
+        assert_eq!(txt.len(), 1);
+        // top-K：空查询全部命中，只取路径最短的两条
+        let top = eg.search(&SearchQuery { text: String::new(), limit: 2, ..Default::default() });
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].path, "C:\\Docs");
+        assert_eq!(top[1].path, "C:\\docs_backup");
+    }
+
+    #[test]
+    fn usn_create_delete_rename_keeps_counters() {
+        let mut eg = test_engine();
+        // 根目录也是存活条目（与 stats() 原有语义一致）
+        assert_eq!(eg.stats().total_alive, 5);
+        assert_eq!(eg.stats().total_dirs, 3);
+
+        eg.apply_usn_records(0, vec![RawRecord {
+            frn: 6, parent_frn: 2, name: "New.txt".into(), attrs: 0x20, ts_unix: 200,
+            reason: USN_REASON_FILE_CREATE,
+        }]);
+        assert_eq!(eg.stats().total_alive, 6);
+        let hits = eg.search(&SearchQuery { text: "new.txt".into(), name_only: true, ..Default::default() });
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "C:\\Docs\\New.txt");
+
+        eg.apply_usn_records(0, vec![RawRecord {
+            frn: 3, parent_frn: 2, name: "report.txt".into(), attrs: 0x20, ts_unix: 200,
+            reason: USN_REASON_FILE_DELETE,
+        }]);
+        assert_eq!(eg.stats().total_alive, 5);
+        assert!(eg.search(&q("report")).is_empty());
+
+        eg.apply_usn_records(0, vec![
+            RawRecord {
+                frn: 6, parent_frn: 2, name: "New.txt".into(), attrs: 0x20, ts_unix: 200,
+                reason: USN_REASON_RENAME_OLD_NAME,
+            },
+            RawRecord {
+                frn: 6, parent_frn: 4, name: "Renamed.md".into(), attrs: 0x20, ts_unix: 200,
+                reason: USN_REASON_RENAME_NEW_NAME,
+            },
+        ]);
+        assert_eq!(eg.stats().total_alive, 5);
+        let hits = eg.search(&SearchQuery { text: "renamed".into(), name_only: true, ..Default::default() });
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "C:\\docs_backup\\Renamed.md");
+
+        // 删除目录连同子树：Renamed.md 已在 docs_backup 里，一并删除
+        eg.apply_usn_records(0, vec![RawRecord {
+            frn: 4, parent_frn: 1, name: "docs_backup".into(),
+            attrs: FILE_ATTRIBUTE_DIRECTORY, ts_unix: 200, reason: USN_REASON_FILE_DELETE,
+        }]);
+        assert_eq!(eg.stats().total_alive, 2); // 根 + Docs
+        assert_eq!(eg.stats().total_dirs, 2);
+        assert!(eg.search(&q("notes")).is_empty());
+        assert!(eg.search(&q("renamed")).is_empty());
     }
 }

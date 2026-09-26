@@ -25,10 +25,17 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// 同步命令跑在 Tauri 主线程上，会把整个窗口（包括键盘输入）冻住。
+/// 搜索/缩略图/图标/AI 这类重活一律 async + spawn_blocking 丢到线程池。
 #[tauri::command]
-pub fn search(state: State<AppState>, q: SearchQuery) -> Vec<Hit> {
-    let eg = state.engine.read().unwrap();
-    eg.search(&q)
+pub async fn search(state: State<'_, AppState>, q: SearchQuery) -> Result<Vec<Hit>, String> {
+    let engine = state.engine.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let eg = engine.read().unwrap();
+        eg.search(&q)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -42,11 +49,12 @@ pub struct StatusInfo {
 }
 
 #[tauri::command]
-pub fn get_status(state: State<AppState>) -> StatusInfo {
+pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String> {
     let s = state.status.state.load(std::sync::atomic::Ordering::Relaxed);
+    // stats() 是 O(1) 增量计数器（引擎侧维护），前端每 1.5s 轮询也不再遍历全索引
     let eg = state.engine.read().unwrap();
     let stats = eg.stats();
-    StatusInfo {
+    Ok(StatusInfo {
         state: match s {
             STATE_SCANNING => "scanning".into(),
             STATE_READY => "ready".into(),
@@ -57,7 +65,7 @@ pub fn get_status(state: State<AppState>) -> StatusInfo {
         scanned: state.status.scanned.load(std::sync::atomic::Ordering::Relaxed),
         error: state.status.last_error.lock().unwrap().clone(),
         volumes: eg.volume_states().iter().map(|v| v.letter).collect(),
-    }
+    })
 }
 
 #[tauri::command]
@@ -76,11 +84,18 @@ pub fn open_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn reveal_path(path: String) -> Result<(), String> {
+    // shell 解析 + SHOpenFolderAndSelectItems 可能阻塞较久，放线程池
+    tauri::async_runtime::spawn_blocking(move || reveal_path_blocking(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// 在资源管理器中定位并选中文件/文件夹。
 /// 主路径 SHOpenFolderAndSelectItems（原生 API，能复用已打开的资源管理器窗口）；
 /// 失败时回退 explorer.exe /select —— 必须用 raw_arg 传单一参数，否则 Rust 的
 /// argv 转义会破坏引号，explorer 解析不到路径就退化成只打开"此电脑"。
-pub fn reveal_path(path: String) -> Result<(), String> {
+fn reveal_path_blocking(path: &str) -> Result<(), String> {
     use windows::Win32::System::Com::{
         CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED, IBindCtx,
     };
@@ -89,7 +104,7 @@ pub fn reveal_path(path: String) -> Result<(), String> {
         SHBindToParent, SHOpenFolderAndSelectItems, SHParseDisplayName, IShellFolder,
     };
 
-    let file = to_wide(&path);
+    let file = to_wide(path);
     unsafe {
         let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let com_ok = hr.is_ok();
@@ -115,7 +130,7 @@ pub fn reveal_path(path: String) -> Result<(), String> {
                 format!("绑定父目录失败: {e}")
             })?;
 
-            let dir = std::path::Path::new(&path)
+            let dir = std::path::Path::new(path)
                 .parent()
                 .map(|p| p.to_string_lossy().to_string())
                 .ok_or_else(|| "无父目录".to_string())?;
@@ -174,30 +189,42 @@ pub fn set_config(state: State<AppState>, cfg: Config) -> Result<(), String> {
     crate::state::save_config(&state.config_path(), &cfg).map_err(|e| e.to_string())
 }
 
+/// AI 搜索含最长 45s 的阻塞 HTTP 请求，绝不能占主线程
 #[tauri::command]
-pub fn ai_search(state: State<AppState>, text: String) -> Result<AiResult, String> {
+pub async fn ai_search(state: State<'_, AppState>, text: String) -> Result<AiResult, String> {
     let cfg = state.config.lock().unwrap().clone();
-    let eg = state.engine.read().unwrap();
-    run_ai_search(&cfg, &text, &eg)
+    let engine = state.engine.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let eg = engine.read().unwrap();
+        run_ai_search(&cfg, &text, &eg)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn get_icon(
-    state: State<AppState>,
-    ext: String,
-) -> Option<String> {
+pub async fn get_icon(state: State<'_, AppState>, ext: String) -> Result<Option<String>, String> {
     let key = ext.to_lowercase();
     if let Some(v) = state.icons.lock().unwrap().get(&key) {
-        return Some(v.clone());
+        return Ok(Some(v.clone()));
     }
-    let url = crate::icons::icon_data_url(&key)?;
-    state.icons.lock().unwrap().insert(key, url.clone());
-    Some(url)
+    // 未命中才走 shell API + GDI + PNG 编码（线程池）
+    let probe = key.clone();
+    let url = tauri::async_runtime::spawn_blocking(move || crate::icons::icon_data_url(&probe))
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(u) = &url {
+        state.icons.lock().unwrap().insert(key, u.clone());
+    }
+    Ok(url)
 }
 
 #[tauri::command]
-pub fn image_thumb(path: String) -> Option<String> {
-    crate::icons::image_thumbnail(&path)
+pub async fn image_thumb(path: String) -> Result<Option<String>, String> {
+    // 读盘 + 解码 + 缩放 + PNG + base64，单张可达几十毫秒，必须线程池
+    tauri::async_runtime::spawn_blocking(move || Ok(crate::icons::image_thumbnail(&path)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// 弹出系统原生右键菜单（与资源管理器一致）。返回是否执行了命令。
@@ -358,11 +385,18 @@ pub fn show_properties(path: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// 删除到回收站（系统确认进度，FOF_ALLOWUNDO）
+/// 删除到回收站（系统确认进度，FOF_ALLOWUNDO）。SHFileOperationW 会阻塞到
+/// 用户确认/进度条结束，放线程池避免整个窗口冻结。
 #[tauri::command]
-pub fn delete_path(path: String) -> Result<(), String> {
+pub async fn delete_path(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_path_blocking(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn delete_path_blocking(path: &str) -> Result<(), String> {
     use windows::Win32::UI::Shell::{SHFileOperationW, SHFILEOPSTRUCTW, FOF_ALLOWUNDO};
-    let mut from = to_wide(&path);
+    let mut from = to_wide(path);
     from.push(0); // 双 \0 结尾的文件列表
     unsafe {
         let mut op = SHFILEOPSTRUCTW {
@@ -384,19 +418,29 @@ pub fn delete_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn get_autostart(app: AppHandle) -> bool {
-    let out = Command::new("schtasks")
-        .args(["/Query", "/TN", "MonikaSearch"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    matches!(out, Ok(o) if o.status.success())
+pub async fn get_autostart() -> Result<bool, String> {
+    // schtasks 子进程动辄几百毫秒，不能在主线程等它
+    tauri::async_runtime::spawn_blocking(|| {
+        let out = Command::new("schtasks")
+            .args(["/Query", "/TN", "MonikaSearch"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        Ok(matches!(out, Ok(o) if o.status.success()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// requireAdministrator 程序无法可靠地通过 Run 注册表键自启，
 /// 改用登录触发的计划任务（最高权限运行）。
 #[tauri::command]
-pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
-    let _ = app;
+pub async fn set_autostart(enabled: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || set_autostart_blocking(enabled))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn set_autostart_blocking(enabled: bool) -> Result<(), String> {
     if enabled {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let task = format!("\"{}\" --hidden", exe.display());
