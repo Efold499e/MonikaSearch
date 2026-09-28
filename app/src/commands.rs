@@ -171,6 +171,64 @@ fn reveal_path_blocking(path: &str) -> Result<(), String> {
     }
 }
 
+/// 把文本写入系统剪贴板（CF_UNICODETEXT）。剪贴板是全系统单例，可能被别的
+/// 程序短暂占用，OpenClipboard 带短重试——调用方放线程池。
+fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+
+    // CF_UNICODETEXT = 13。windows 0.59 把该常量放在 System::Ole 模块里，
+    // 为一个数值常量开一整个 Ole feature 不值得
+    const CF_UNICODETEXT_U32: u32 = 13;
+
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    wide.push(0);
+    let bytes = wide.len() * std::mem::size_of::<u16>();
+    unsafe {
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(Some(HWND::default())).is_ok() {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !opened {
+            return Err("打开剪贴板失败（被其他程序长期占用）".into());
+        }
+        let r = (|| -> Result<(), String> {
+            EmptyClipboard().map_err(|e| format!("清空剪贴板失败: {e}"))?;
+            let h = GlobalAlloc(GMEM_MOVEABLE, bytes)
+                .map_err(|e| format!("分配剪贴板内存失败: {e}"))?;
+            let p = GlobalLock(h);
+            if p.is_null() {
+                return Err("锁定剪贴板内存失败".into());
+            }
+            std::ptr::copy_nonoverlapping(wide.as_ptr().cast::<u8>(), p.cast::<u8>(), bytes);
+            let _ = GlobalUnlock(h);
+            SetClipboardData(CF_UNICODETEXT_U32, Some(HANDLE(h.0))).map_err(|e| {
+                let _ = GlobalFree(Some(h)); // 写入失败时内存仍归我们，须回收
+                format!("写入剪贴板失败: {e}")
+            })?;
+            // 成功后内存所有权归剪贴板，不能 GlobalFree
+            Ok(())
+        })();
+        let _ = CloseClipboard();
+        r
+    }
+}
+
+/// 复制路径到剪贴板（同步命令但有最多 ~200ms 的剪贴板占用重试，放线程池）
+#[tauri::command]
+pub async fn copy_path(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || copy_text_to_clipboard(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub fn hide_window(app: AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -327,8 +385,29 @@ fn run_menu_host(path: &str) -> Result<bool, String> {
     loop {
         match child.try_wait() {
             Ok(Some(code)) => {
+                // 自定义菜单项（复制路径/在文件夹中显示）不是 shell 动词，宿主
+                // 无法自己执行，退出前把选择写进 status 文件交给主进程处理。
+                let action = std::fs::read_to_string(&status)
+                    .ok()
+                    .and_then(|t| {
+                        t.lines()
+                            .find(|l| l.starts_with("action "))
+                            .map(|l| l["action ".len()..].trim().to_string())
+                    });
                 let _ = std::fs::remove_file(&status);
-                return Ok(code.code() == Some(1));
+                return match action.as_deref() {
+                    // 执行失败（剪贴板被占用等）极少见：菜单已消失，回退为
+                    // "已执行"让前端照常隐藏窗口，不弹错误打断用户
+                    Some("copy") => {
+                        let _ = copy_text_to_clipboard(path);
+                        Ok(true)
+                    }
+                    Some("reveal") => {
+                        let _ = reveal_path_blocking(path);
+                        Ok(true)
+                    }
+                    _ => Ok(code.code() == Some(1)),
+                };
             }
             Ok(None) => {}
             Err(e) => {

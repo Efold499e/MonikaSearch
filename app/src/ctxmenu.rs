@@ -1,5 +1,7 @@
 //! 系统原生右键菜单：对任意路径弹出与资源管理器完全一致的上下文菜单
 //! （含第三方 shell 扩展，如 7-Zip / 杀毒 / Git），选中命令交给系统执行。
+//! 菜单顶部额外附上系统菜单没有的"复制路径 / 在文件夹中显示"两项
+//! （兼容菜单原有功能；选中后经 status 文件的 action 行交主进程执行）。
 //!
 //! 实现：命令线程上 SHParseDisplayName → IContextMenu → TrackPopupMenu
 //! （TPM_RETURNCMD）→ InvokeCommand。消息只窗口把菜单钉在光标处。
@@ -34,12 +36,18 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    GetCursorPos, PostMessageW, RegisterClassW, SetForegroundWindow, TrackPopupMenu,
-    SW_SHOWNORMAL, TPM_LEFTBUTTON, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_NULL, WNDCLASSW, WS_POPUP,
+    GetCursorPos, InsertMenuW, PostMessageW, RegisterClassW, SetForegroundWindow, TrackPopupMenu,
+    MENU_ITEM_FLAGS, MF_BYPOSITION, MF_SEPARATOR, MF_STRING, SW_SHOWNORMAL, TPM_LEFTBUTTON,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_NULL, WNDCLASSW, WS_POPUP,
 };
 
 pub static MENU_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// 自定义菜单项 id。必须落在系统动词区间 [idCmdFirst=1, idCmdLast=0x7FFF] 之外，
+/// 否则 TrackPopupMenu 的返回值会被当成 lpVerb 偏移传给 InvokeCommand。
+/// i32：TrackPopupMenu(TPM_RETURNCMD) 在 windows crate 里返回 i32。
+const CMD_COPY_PATH: i32 = 0x8001;
+const CMD_REVEAL: i32 = 0x8002;
 
 pub fn is_open() -> bool {
     MENU_OPEN.load(Ordering::SeqCst)
@@ -388,10 +396,22 @@ fn context_menu_impl(path: &str, max_step: u32) -> Result<bool, String> {
             DestroyWindow(host).ok();
             return Err(format!("QueryContextMenu 失败: {hr:?}"));
         }
-        status(&format!("ready items={}", (hr.0 as u32) & 0xFFFF));
+        let shell_items = (hr.0 as u32) & 0xFFFF;
+        status(&format!("ready items={shell_items}"));
 
         if max_step < 3 {
             return Ok(false);
+        }
+
+        // 3.5 顶部追加系统菜单没有的两个动词（兼容菜单原有的功能）：
+        //     "复制路径 / 在文件夹中显示"。它们不是 shell 动词，ctxhost 不执行，
+        //     而是经 status 文件的 action 行回传主进程处理（见 commands.rs）。
+        let mf = MENU_ITEM_FLAGS(MF_BYPOSITION.0 | MF_STRING.0);
+        let _ = InsertMenuW(hmenu, 0, mf, CMD_COPY_PATH as usize, windows::core::w!("复制路径"));
+        let _ = InsertMenuW(hmenu, 1, mf, CMD_REVEAL as usize, windows::core::w!("在文件夹中显示"));
+        if shell_items > 0 {
+            let sep = MENU_ITEM_FLAGS(MF_BYPOSITION.0 | MF_SEPARATOR.0);
+            let _ = InsertMenuW(hmenu, 2, sep, 0, PCWSTR::null());
         }
 
         // 4. 光标处弹出（前台必须设为宿主，否则点击外部菜单不消失）
@@ -415,14 +435,28 @@ fn context_menu_impl(path: &str, max_step: u32) -> Result<bool, String> {
         let mut acted = false;
         let cmd = chosen.0 as usize;
         if cmd != 0 {
-            let mut ici = CMINVOKECOMMANDINFO::default();
-            ici.cbSize = std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32;
-            ici.hwnd = host;
-            ici.lpVerb = PCSTR::from_raw(cmd as *const u8);
-            ici.nShow = SW_SHOWNORMAL.0;
-            match ctx.InvokeCommand(&ici) {
-                Ok(()) => acted = true,
-                Err(e) => log(&format!("InvokeCommand 失败: {e}")),
+            match chosen.0 {
+                // 自定义动词（区间外 id）：不在宿主进程执行——剪贴板写入、
+                // SHOpenFolderAndSelectItems 都在主进程做，这里只回传选择。
+                CMD_COPY_PATH => {
+                    status("action copy");
+                    acted = true;
+                }
+                CMD_REVEAL => {
+                    status("action reveal");
+                    acted = true;
+                }
+                _ => {
+                    let mut ici = CMINVOKECOMMANDINFO::default();
+                    ici.cbSize = std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32;
+                    ici.hwnd = host;
+                    ici.lpVerb = PCSTR::from_raw(cmd as *const u8);
+                    ici.nShow = SW_SHOWNORMAL.0;
+                    match ctx.InvokeCommand(&ici) {
+                        Ok(()) => acted = true,
+                        Err(e) => log(&format!("InvokeCommand 失败: {e}")),
+                    }
+                }
             }
         }
 

@@ -389,7 +389,7 @@ async function showFallbackMenu(path) {
   const items = [
     { icon: '📂', label: '打开', act: () => invoke('open_path', { path }).then(() => invoke('hide_window')) },
     { icon: '📁', label: '在文件夹中显示', act: () => invoke('reveal_path', { path }).then(() => invoke('hide_window')) },
-    { icon: '📋', label: '复制路径', act: () => copyText(path) },
+    { icon: '📋', label: '复制路径', act: () => invoke('copy_path', { path }) },
     { icon: 'ℹ️', label: '属性', act: () => invoke('show_properties', { path }) },
     { sep: true },
     { icon: '🗑️', label: '删除（移到回收站）', act: () => invoke('delete_path', { path }).then(() => doSearch()) },
@@ -426,16 +426,6 @@ function closeFallbackMenu() {
   document.getElementById('fallback-menu')?.remove();
 }
 
-async function copyText(text) {
-  const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.position = 'fixed';
-  ta.style.opacity = '0';
-  document.body.appendChild(ta);
-  ta.select();
-  document.execCommand('copy');
-  ta.remove();
-}
 resultsEl.addEventListener('contextmenu', (e) => {
   e.preventDefault();
   const row = e.target.closest('.row');

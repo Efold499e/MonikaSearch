@@ -48,6 +48,7 @@ fn main() {
             commands::rebuild,
             commands::open_path,
             commands::reveal_path,
+            commands::copy_path,
             commands::hide_window,
             commands::get_config,
             commands::set_config,
