@@ -155,6 +155,60 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     (ab.len() - i).cmp(&(bb.len() - j))
 }
 
+/// 折叠匹配的 needle：连续非字母数字字符合并为一个弹性位。
+/// 弹性位在目标中匹配一段（≥1 个）非字母数字字符。
+fn fold_needle(text: &str) -> Vec<char> {
+    let mut v = Vec::new();
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            v.push(c);
+        } else if v.last().map_or(true, |&l| l.is_alphanumeric()) {
+            v.push(c); // 连续标点折叠为一个弹性位
+        }
+    }
+    v
+}
+
+/// 折叠查找：needle 中字母数字必须精确匹配（两侧均已小写化），
+/// 弹性位（标点/空格）匹配目标中 ≥1 个连续非字母数字字符——
+/// camera_demo ↔ camera-demo ↔ camera demo。CJK 等字母数字不受影响。
+/// 返回匹配起点的字节偏移。
+fn folded_find(haystack: &str, needle: &[char]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    'start: for (spos, _) in haystack.char_indices() {
+        let mut hit = haystack[spos..].chars().peekable();
+        let mut nidx = 0usize;
+        loop {
+            let Some(&nch) = needle.get(nidx) else {
+                return Some(spos); // needle 用尽 → 命中
+            };
+            let Some(&hch) = hit.peek() else {
+                continue 'start; // haystack 用尽
+            };
+            if nch.is_alphanumeric() {
+                if nch != hch {
+                    continue 'start;
+                }
+                hit.next();
+            } else {
+                if hch.is_alphanumeric() {
+                    continue 'start;
+                }
+                while let Some(&h2) = hit.peek() {
+                    if h2.is_alphanumeric() {
+                        break;
+                    }
+                    hit.next();
+                }
+            }
+            nidx += 1;
+        }
+    }
+    None
+}
+
 impl Engine {
     pub fn empty() -> Engine {
         Engine {
@@ -603,6 +657,15 @@ impl Engine {
         let empty = text.is_empty();
         let name_only = q.name_only;
         let sort = SortMode::parse(&q.sort);
+        // 标点折叠：查询含标点/空格时，标点位可匹配任意标点串
+        // （camera_demo → camera-demo.html）。纯字母数字查询零开销。
+        let needle = fold_needle(&text);
+        let foldable = needle.iter().any(|c| !c.is_alphanumeric());
+        // token 预过滤：折叠匹配前先快速确认各字母数字段都存在
+        let tokens: Vec<&str> = text
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .collect();
 
         let mut scored: Vec<(i32, u32)> = self
             .entries
@@ -669,11 +732,20 @@ impl Engine {
                 // 文件名段优先匹配：短串上的 find 比全路径扫描快得多，
                 // 且文件名命中即无需再扫整条路径
                 let name_seg = &e.path_lower[e.name_off as usize..];
-                let name_pos = name_seg.find(&text);
+                let mut name_pos = name_seg.find(&text);
+                if name_pos.is_none() && foldable {
+                    name_pos = folded_find(name_seg, &needle);
+                }
                 if name_only {
                     return name_pos.map(|pos| (if pos == 0 { 0 } else { 1 }, i as u32));
                 }
-                if name_pos.is_some() || e.path_lower.contains(&text) {
+                let mut hit = name_pos.is_some() || e.path_lower.contains(&text);
+                if !hit && foldable {
+                    // 折叠匹配（含 token 预过滤快速拒绝）
+                    hit = tokens.iter().all(|t| e.path_lower.contains(t))
+                        && folded_find(&e.path_lower, &needle).is_some();
+                }
+                if hit {
                     let score = match name_pos {
                         Some(0) => 0, // 文件名以关键词开头
                         Some(_) => 1, // 文件名包含关键词
@@ -956,6 +1028,35 @@ mod tests {
         });
         assert_eq!(contains.len(), 1);
         assert_eq!(contains[0].path, "C:\\docs_backup\\notes.md");
+    }
+
+    #[test]
+    fn folded_find_units() {
+        let n = |s: &str| fold_needle(s);
+        assert_eq!(folded_find("camera-demo.html", &n("camera_demo")), Some(0));
+        assert_eq!(folded_find("camera demo", &n("camera-demo")), Some(0));
+        assert_eq!(folded_find("camera-demo", &n("camera  demo")), Some(0)); // 连续标点折叠
+        assert_eq!(folded_find("xcamera-demo", &n("camera_demo")), Some(1));
+        assert_eq!(folded_find("camerademo", &n("camera_demo")), None); // 弹性位须 ≥1 字符
+        assert_eq!(folded_find("camera-xx-demo", &n("camera_demo")), None); // 间隔不能有字母
+        assert_eq!(folded_find("相机-demo", &n("相机 demo")), Some(0)); // CJK 精确匹配
+        assert_eq!(folded_find("云台打印件", &n("云台 打印件")), None);
+        assert_eq!(folded_find("abc", &n("abc")), Some(0));
+        assert_eq!(folded_find("ab", &n("abc")), None);
+    }
+
+    #[test]
+    fn punctuation_folded_search() {
+        let eg = test_engine(); // C:\Docs\report.txt / C:\docs_backup\notes.md
+        // 下划线命中连字符文件名
+        let hits = eg.search(&q("report_txt"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "C:\\Docs\\report.txt");
+        // 空格命中下划线目录名,前缀命中排最前
+        let hits2 = eg.search(&q("docs backup"));
+        assert_eq!(hits2[0].path, "C:\\docs_backup");
+        // 无标点差异时仍精确:连写的词不命中
+        assert!(eg.search(&q("docsbackup")).is_empty());
     }
 
     #[test]
