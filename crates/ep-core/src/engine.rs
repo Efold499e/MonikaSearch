@@ -79,9 +79,12 @@ pub struct SearchQuery {
     pub text: String,               // 小写子串
     pub name_only: bool,            // 只匹配文件名段
     pub path_prefix: Option<String>,// 小写路径前缀（目录范围）
+    pub path_contains: Option<String>, // 目录部分（不含文件名）任意位置包含
     pub exts: Vec<String>,          // 小写扩展名（不含点）
     pub kind: String,               // all | file | dir
     pub modified_within_days: Option<i64>,
+    /// relevance（默认）| name | name_desc | time（新→旧）| time_asc
+    pub sort: String,
     pub limit: usize,
 }
 
@@ -91,6 +94,65 @@ pub struct Hit {
     pub path: String,     // 原始大小写完整路径
     pub is_dir: bool,
     pub last_write: i64,
+}
+
+/// 结果排序方式
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortMode {
+    Relevance,
+    NameAsc,
+    NameDesc,
+    TimeDesc,
+    TimeAsc,
+}
+
+impl SortMode {
+    fn parse(s: &str) -> SortMode {
+        match s {
+            "name" => SortMode::NameAsc,
+            "name_desc" => SortMode::NameDesc,
+            "time" | "time_desc" => SortMode::TimeDesc,
+            "time_asc" => SortMode::TimeAsc,
+            _ => SortMode::Relevance,
+        }
+    }
+}
+
+/// 自然排序：数字段按数值比较（file2 < file10），其余逐字节小写比较。
+/// 输入应为小写（调用方保证）；非 ASCII 按 UTF-8 字节序（即码点序）。
+/// 前导零不参与数值（file01 == file1，比较其后的部分）。
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (ab, bb) = (a.as_bytes(), b.as_bytes());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < ab.len() && j < bb.len() {
+        if ab[i].is_ascii_digit() && bb[j].is_ascii_digit() {
+            let i2 = ab[i..]
+                .iter()
+                .position(|c| !c.is_ascii_digit())
+                .map_or(ab.len(), |p| i + p);
+            let j2 = bb[j..]
+                .iter()
+                .position(|c| !c.is_ascii_digit())
+                .map_or(bb.len(), |p| j + p);
+            let ta = a[i..i2].trim_start_matches('0');
+            let tb = b[j..j2].trim_start_matches('0');
+            let ord = ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            i = i2;
+            j = j2;
+        } else {
+            let (la, lb) = (ab[i].to_ascii_lowercase(), bb[j].to_ascii_lowercase());
+            if la != lb {
+                return la.cmp(&lb);
+            }
+            i += 1;
+            j += 1;
+        }
+    }
+    (ab.len() - i).cmp(&(bb.len() - j))
 }
 
 impl Engine {
@@ -513,7 +575,22 @@ impl Engine {
     pub fn search(&self, q: &SearchQuery) -> Vec<Hit> {
         let text = q.text.to_lowercase();
         let exts: Vec<String> = q.exts.iter().map(|e| e.trim_start_matches('.').to_lowercase()).collect();
-        let path_prefix_lower = q.path_prefix.as_ref().map(|p| p.to_lowercase());
+        let path_prefix_lower = q
+            .path_prefix
+            .as_ref()
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty());
+        // 被限定范围的根目录自身（前缀去掉尾部反斜杠）也算候选：
+        // 右键某个文件夹搜索时，文件夹自己应能被文件名命中
+        let scope_root = path_prefix_lower
+            .as_ref()
+            .and_then(|p| p.strip_suffix('\\'))
+            .map(String::from);
+        let path_contains_lower = q
+            .path_contains
+            .as_ref()
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty());
         let cutoff = q.modified_within_days.map(|d| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -523,6 +600,7 @@ impl Engine {
         let limit = if q.limit == 0 { 500 } else { q.limit };
         let empty = text.is_empty();
         let name_only = q.name_only;
+        let sort = SortMode::parse(&q.sort);
 
         let mut scored: Vec<(i32, u32)> = self
             .entries
@@ -537,6 +615,23 @@ impl Engine {
             .filter(|(_, e)| {
                 if let Some(pre) = &path_prefix_lower {
                     if !e.path_lower.starts_with(pre.as_str()) {
+                        let is_scope_root = match &scope_root {
+                            Some(r) => e.is_dir && e.path_lower == r.as_str(),
+                            None => false,
+                        };
+                        if !is_scope_root {
+                            return false;
+                        }
+                    }
+                }
+                true
+            })
+            .filter(|(_, e)| {
+                if let Some(needle) = &path_contains_lower {
+                    // 只匹配目录部分（文件名之前的整条路径），
+                    // 与"路径中应包含的目录名"语义一致
+                    let dir_part = &e.path_lower[..e.name_off as usize];
+                    if !dir_part.contains(needle.as_str()) {
                         return false;
                     }
                 }
@@ -590,15 +685,8 @@ impl Engine {
 
         // 只取前 limit 条：select_nth O(n) 划分出 top-K，再对 K 条排序，
         // 避免空查询/短查询把几十万命中整段 O(n log n) 排序；
-        // 平分时按下标决出稳定顺序，与全量稳定排序一致
-        let cmp = |a: &(i32, u32), b: &(i32, u32)| {
-            let ea = &self.entries[a.1 as usize];
-            let eb = &self.entries[b.1 as usize];
-            a.0.cmp(&b.0)
-                .then(ea.path_lower.len().cmp(&eb.path_lower.len()))
-                .then(eb.last_write.cmp(&ea.last_write))
-                .then(a.1.cmp(&b.1))
-        };
+        // 比较器与所选排序方式一致，平分时按下标决出稳定顺序
+        let cmp = |a: &(i32, u32), b: &(i32, u32)| self.cmp_hits(a, b, sort);
         if scored.len() > limit {
             scored.select_nth_unstable_by(limit - 1, cmp);
             scored.truncate(limit);
@@ -616,6 +704,36 @@ impl Engine {
                 }
             })
             .collect()
+    }
+
+    /// 两条命中的顺序（top-K 划分与最终排序共用同一个比较器）
+    fn cmp_hits(&self, a: &(i32, u32), b: &(i32, u32), mode: SortMode) -> std::cmp::Ordering {
+        let ea = &self.entries[a.1 as usize];
+        let eb = &self.entries[b.1 as usize];
+        match mode {
+            SortMode::Relevance => a
+                .0
+                .cmp(&b.0)
+                .then(ea.path_lower.len().cmp(&eb.path_lower.len()))
+                .then(eb.last_write.cmp(&ea.last_write))
+                .then(a.1.cmp(&b.1)),
+            SortMode::NameAsc | SortMode::NameDesc => {
+                let na = &ea.path_lower[ea.name_off as usize..];
+                let nb = &eb.path_lower[eb.name_off as usize..];
+                let ord = natural_cmp(na, nb).then_with(|| ea.path_lower.cmp(&eb.path_lower));
+                if mode == SortMode::NameDesc { ord.reverse() } else { ord }
+            }
+            SortMode::TimeDesc | SortMode::TimeAsc => {
+                let ord = eb.last_write.cmp(&ea.last_write);
+                let ord = if mode == SortMode::TimeAsc { ord.reverse() } else { ord };
+                ord.then_with(|| {
+                    let na = &ea.path_lower[ea.name_off as usize..];
+                    let nb = &eb.path_lower[eb.name_off as usize..];
+                    natural_cmp(na, nb)
+                })
+                .then(a.1.cmp(&b.1))
+            }
+        }
     }
 }
 
@@ -681,6 +799,148 @@ mod tests {
         assert_eq!(top.len(), 2);
         assert_eq!(top[0].path, "C:\\Docs");
         assert_eq!(top[1].path, "C:\\docs_backup");
+    }
+
+    #[test]
+    fn path_prefix_scopes_and_keeps_scope_root() {
+        let eg = test_engine();
+        // 前缀大小写与尾部反斜杠由调用方传入，引擎统一小写化
+        let q = SearchQuery {
+            text: String::new(),
+            path_prefix: Some("C:\\Docs\\".into()),
+            ..Default::default()
+        };
+        let hits = eg.search(&q);
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        // 范围根目录自身 + 其子文件；docs_backup 系不得混入
+        assert_eq!(paths, vec!["C:\\Docs", "C:\\Docs\\report.txt"]);
+
+        // 关键词命中范围根自身：右键某文件夹搜索它的名字时应能看到它
+        // （report.txt 因完整路径含 docs 也命中，排在后面）
+        let q2 = SearchQuery {
+            text: "docs".into(),
+            path_prefix: Some("C:\\Docs\\".into()),
+            ..Default::default()
+        };
+        let hits2 = eg.search(&q2);
+        assert_eq!(hits2.len(), 2);
+        assert_eq!(hits2[0].path, "C:\\Docs");
+        assert_eq!(hits2[1].path, "C:\\Docs\\report.txt");
+
+        // 同名前缀目录不得误入：C:\docs_backup 不以 c:\docs\ 开头
+        let q3 = SearchQuery {
+            text: String::new(),
+            path_prefix: Some("C:\\Docs\\".into()),
+            kind: "file".into(),
+            ..Default::default()
+        };
+        let hits3 = eg.search(&q3);
+        assert_eq!(hits3.len(), 1);
+        assert_eq!(hits3[0].path, "C:\\Docs\\report.txt");
+    }
+
+    #[test]
+    fn path_contains_matches_directory_part() {
+        let eg = test_engine();
+        // 目录部分含 "docs"：两个子文件命中；两个目录自身的目录部分是 c:\，不含
+        let q = SearchQuery {
+            text: String::new(),
+            path_contains: Some("DOCS".into()),
+            ..Default::default()
+        };
+        let hits = eg.search(&q);
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["C:\\Docs\\report.txt", "C:\\docs_backup\\notes.md"]);
+
+        // 更具体的目录名只命中其子文件
+        let q2 = SearchQuery {
+            text: "notes".into(),
+            path_contains: Some("backup".into()),
+            ..Default::default()
+        };
+        let hits2 = eg.search(&q2);
+        assert_eq!(hits2.len(), 1);
+        assert_eq!(hits2[0].path, "C:\\docs_backup\\notes.md");
+    }
+
+    fn sort_engine() -> Engine {
+        let mut eg = Engine::empty();
+        eg.volumes.push(VolumeState { letter: 'C', root_frn: 1, journal_id: 1, next_usn: 0 });
+        let rows: Vec<(u64, u64, &str, bool, i64)> = vec![
+            (1, 1, "C:", true, 100),
+            (2, 1, "Docs", true, 110),
+            (3, 2, "file10.txt", false, 300),
+            (4, 2, "file2.txt", false, 200),
+            (5, 2, "File1.txt", false, 500),
+        ];
+        for (i, (frn, parent, name, is_dir, ts)) in rows.into_iter().enumerate() {
+            eg.entries.push(Entry {
+                vol: 0, frn, parent_frn: parent, name: name.into(), is_dir,
+                last_write: ts, path_lower: String::new(), name_off: 0, dead: false,
+            });
+            eg.by_frn.insert((0, frn), i as u32);
+        }
+        eg.rebuild_all_paths();
+        eg.recount();
+        eg
+    }
+
+    #[test]
+    fn sort_name_natural_ascending() {
+        let eg = sort_engine();
+        let hits = eg.search(&SearchQuery {
+            text: String::new(),
+            sort: "name".into(),
+            ..Default::default()
+        });
+        let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+        // file2 在 file10 之前（数值序），大小写不敏感
+        assert_eq!(names, vec!["Docs", "File1.txt", "file2.txt", "file10.txt"]);
+    }
+
+    #[test]
+    fn sort_name_desc_reverses() {
+        let eg = sort_engine();
+        let hits = eg.search(&SearchQuery {
+            text: String::new(),
+            sort: "name_desc".into(),
+            ..Default::default()
+        });
+        let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, vec!["file10.txt", "file2.txt", "File1.txt", "Docs"]);
+    }
+
+    #[test]
+    fn sort_time_desc_and_asc() {
+        let eg = sort_engine();
+        let newest = eg.search(&SearchQuery {
+            text: String::new(),
+            sort: "time".into(),
+            ..Default::default()
+        });
+        let names: Vec<&str> = newest.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, vec!["File1.txt", "file10.txt", "file2.txt", "Docs"]);
+
+        let oldest = eg.search(&SearchQuery {
+            text: String::new(),
+            sort: "time_asc".into(),
+            ..Default::default()
+        });
+        let names2: Vec<&str> = oldest.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names2, vec!["Docs", "file2.txt", "file10.txt", "File1.txt"]);
+    }
+
+    #[test]
+    fn natural_cmp_basics() {
+        use std::cmp::Ordering::*;
+        assert_eq!(natural_cmp("file2", "file10"), Less);
+        assert_eq!(natural_cmp("file10", "file2"), Greater);
+        assert_eq!(natural_cmp("file01", "file1"), Equal);
+        assert_eq!(natural_cmp("abc", "abd"), Less);
+        assert_eq!(natural_cmp("a2b", "a10c"), Less);
+        assert_eq!(natural_cmp("文档2", "文档10"), Less);
+        assert_eq!(natural_cmp("", "a"), Less);
+        assert_eq!(natural_cmp("a", ""), Greater);
     }
 
     #[test]

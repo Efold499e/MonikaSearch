@@ -6,7 +6,7 @@
 
 - **托盘常驻，开机自启**：索引一直在内存里实时更新，`Alt+E`（或 `Alt+Space`）呼出即搜，永不重新扫盘
 - **自研索引引擎**：`FSCTL_ENUM_USN_DATA` 全量枚举 + `FSCTL_READ_USN_JOURNAL` 增量监听（参考 [ultrasearch](https://github.com/Dicklesworthstone/ultrasearch) / [usn-journal-rs](https://github.com/wangfu91/usn-journal-rs) 的思路，不依赖 Everything）
-- **搜索方式**：文件名/路径子串；类型 chips（文档/图片/视频/音频/压缩包/代码）；Tab 限定到结果所在目录
+- **搜索方式**：文件名/路径子串；类型 chips（文档/图片/视频/音频/压缩包/代码）；Tab 限定文件夹（选中文件→限定所在目录，选中文件夹→进入该文件夹）；排序：相关度 / 名称 A→Z、Z→A（数字按数值自然排序，file2 < file10）/ 修改时间 新→旧、旧→新，选择记忆在本地
 - **预览**：结果列表显示系统真实文件类型图标；图片文件直接显示缩略图
 - **AI 自然语言搜索**：输入 `xxx->ai`，回车后由 OpenAI 兼容 API 转结构化查询在本地索引执行（接口与密钥在设置里自行填写，如 DeepSeek）
 - **键盘优先**：↑↓ 选择 · Enter 打开 · Ctrl+Enter 资源管理器定位 · Esc 清空/隐藏
@@ -64,7 +64,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/make-dist.ps1 -SkipN
 `ep-mcp.exe` 是标准 MCP 服务器（stdio，newline-delimited JSON-RPC，协议 2024-11-05），加载索引缓存为快照，无需管理员权限。
 
 工具：
-- `search_files(query, name_only?, path_prefix?, exts?, kind?, modified_within_days?, limit?)` — 全盘搜索
+- `search_files(query, name_only?, path_prefix?, path_contains?, exts?, kind?, modified_within_days?, sort?, limit?)` — 全盘搜索（sort：relevance/name/name_desc/time/time_asc）
 - `get_index_status()` — 索引规模/卷
 - `open_file(path)` / `reveal_file(path)` — 打开 / 资源管理器定位
 

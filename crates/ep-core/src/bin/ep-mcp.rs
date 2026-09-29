@@ -112,9 +112,11 @@ fn tool_specs() -> Vec<Value> {
                 "query": {"type": "string", "description": "搜索关键词（匹配文件名或完整路径，大小写不敏感；空串=列出全部）"},
                 "name_only": {"type": "boolean", "description": "true=只匹配文件名（默认 false，同时匹配路径）"},
                 "path_prefix": {"type": "string", "description": "限定路径前缀，如 D:\\projects"},
+                "path_contains": {"type": "string", "description": "目录部分应包含的子串（不要求开头），如 downloads"},
                 "exts": {"type": "array", "items": {"type": "string"}, "description": "扩展名过滤，如 [\"pdf\",\"docx\"]"},
                 "kind": {"type": "string", "enum": ["all", "file", "dir"], "description": "只搜文件/只搜文件夹/全部（默认 all）"},
                 "modified_within_days": {"type": "integer", "description": "只返回最近 N 天内修改的文件"},
+                "sort": {"type": "string", "enum": ["relevance", "name", "name_desc", "time", "time_asc"], "description": "排序：相关度（默认）/名称 A→Z/名称 Z→A/修改时间新→旧/修改时间旧→新"},
                 "limit": {"type": "integer", "description": "返回条数上限（默认 50，最大 500）"}
             },
             "required": ["query"]
@@ -175,12 +177,14 @@ fn call_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<String, String> {
                 text: query,
                 name_only: args["name_only"].as_bool().unwrap_or(false),
                 path_prefix: args["path_prefix"].as_str().map(String::from),
+                path_contains: args["path_contains"].as_str().map(String::from),
                 exts: args["exts"]
                     .as_array()
                     .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                     .unwrap_or_default(),
                 kind: args["kind"].as_str().unwrap_or("all").to_string(),
                 modified_within_days: args["modified_within_days"].as_i64(),
+                sort: args["sort"].as_str().unwrap_or("").to_string(),
                 limit,
             };
             let hits = e.search(&q);

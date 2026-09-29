@@ -11,7 +11,7 @@ const SYSTEM_PROMPT: &str = r#"你是 Windows 文件搜索助手。把用户的�
 {
   "keywords": ["文件名关键词数组，小写，通常1-3个，可为空数组"],
   "name_only": true,
-  "path_contains": "路径中应包含的目录名小写，或 null",
+  "path_contains": "目录位置关键词，小写，如 downloads、desktop、program files；表示文件应位于路径含此子串的目录下；不确定则 null",
   "exts": ["扩展名数组（不含点），如 [\"pdf\",\"docx\"]，或空数组"],
   "kind": "file 或 dir 或 all",
   "modified_within_days": 30,
@@ -84,10 +84,14 @@ pub fn run_ai_search(cfg: &Config, text: &str, engine: &Engine) -> Result<AiResu
         let hits = engine.search(&SearchQuery {
             text: kw.clone(),
             name_only,
-            path_prefix: path_contains.clone(),
+            // path_contains 是"目录位置"语义（路径中包含该目录名），不能当
+            // 前缀用——所有路径都以盘符开头，当 prefix 用必然 0 命中
+            path_prefix: None,
+            path_contains: path_contains.clone(),
             exts: exts.clone(),
             kind: kind.clone(),
             modified_within_days: days,
+            sort: String::new(),
             limit: 300,
         });
         for h in hits {

@@ -31,6 +31,13 @@ let engineReady = false;
 let aiBusy = false;
 // 搜索序号：命令已异步化，先发的可能后到，旧结果必须丢弃
 let searchSeq = 0;
+// 排序方式：relevance | name | name_desc | time | time_asc（引擎执行，AI 结果客户端重排）
+const SORT_VALUES = new Set(['relevance', 'name', 'name_desc', 'time', 'time_asc']);
+let sortBy = 'relevance';
+try {
+  const saved = localStorage.getItem('monika.sort');
+  if (SORT_VALUES.has(saved)) sortBy = saved;
+} catch (e) { /* 隐私模式等 */ }
 
 const $ = (id) => document.getElementById(id);
 const input = $('q');
@@ -112,6 +119,40 @@ function fmtDate(unix) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+// 自然比较：数字段按数值（file2 < file10），与引擎侧 natural_cmp 规则一致
+function naturalCmp(a, b) {
+  const as = a.match(/\d+|\D+/g) || [];
+  const bs = b.match(/\d+|\D+/g) || [];
+  const n = Math.min(as.length, bs.length);
+  for (let i = 0; i < n; i++) {
+    const x = as[i], y = bs[i];
+    let c;
+    if (/\d/.test(x[0]) && /\d/.test(y[0])) {
+      const nx = parseInt(x, 10), ny = parseInt(y, 10);
+      c = nx === ny ? 0 : (nx < ny ? -1 : 1);
+    } else {
+      c = x < y ? -1 : x > y ? 1 : 0;
+    }
+    if (c) return c;
+  }
+  return (as.length - bs.length) || (a < b ? -1 : a > b ? 1 : 0);
+}
+
+// AI 搜索返回的是关键词命中率排序；用户选了具体排序方式时在本地重排
+function sortHitsClient(list) {
+  if (sortBy.startsWith('name')) {
+    const dir = sortBy === 'name_desc' ? -1 : 1;
+    list.sort((a, b) =>
+      dir * naturalCmp(a.name.toLowerCase(), b.name.toLowerCase()) ||
+      (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  } else if (sortBy.startsWith('time')) {
+    const dir = sortBy === 'time_asc' ? -1 : 1;
+    list.sort((a, b) =>
+      dir * (b.last_write - a.last_write) ||
+      naturalCmp(a.name.toLowerCase(), b.name.toLowerCase()));
+  }
+}
+
 // ── AI 模式识别：以 ->ai 结尾 ──
 function isAiMode() {
   return /->\s*ai\s*$/i.test(input.value);
@@ -129,6 +170,7 @@ function buildQuery() {
     exts: [...activeTypes].flatMap(id => TYPE_GROUPS.find(g => g.id === id).exts),
     kind: 'all',
     modified_within_days: null,
+    sort: sortBy,
     limit: 300,
   };
   return q;
@@ -165,6 +207,7 @@ async function doAiSearch() {
     const r = await invoke('ai_search', { text });
     if (seq !== searchSeq) { aiBusy = false; return; }
     hits = r.hits;
+    if (sortBy !== 'relevance') sortHitsClient(hits);
     sel = hits.length ? 0 : -1;
     const kws = r.keywords.map(k => `<span class="kw">${esc(k)}</span>`).join('');
     const days = r.days ? `<span class="kw">近 ${r.days} 天</span>` : '';
@@ -291,9 +334,12 @@ input.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (hits[sel]) {
       const p = hits[sel].path;
-      const dir = p.slice(0, p.lastIndexOf('\\'));
+      // 选中文件夹 = 限定进该文件夹本身；选中文件 = 限定到所在目录。
+      // （旧实现对文件夹也取父目录，顶层文件夹会退化成限定整个盘）
+      const dir = hits[sel].is_dir ? p : p.slice(0, p.lastIndexOf('\\'));
       if (dir) {
-        pathPrefix = { display: dir.split('\\').pop() + '\\', value: dir + '\\' };
+        const seg = dir.split('\\').filter(Boolean).pop() || dir;
+        pathPrefix = { display: seg + '\\', value: dir + '\\' };
         doSearch();
       }
     }
@@ -318,6 +364,18 @@ $('chips').addEventListener('click', (e) => {
   if (chip) {
     const id = chip.dataset.type;
     activeTypes.has(id) ? activeTypes.delete(id) : activeTypes.add(id);
+    doSearch();
+  }
+});
+
+// 排序方式切换
+$('sort-select').value = sortBy;
+$('sort-select').addEventListener('change', () => {
+  sortBy = $('sort-select').value;
+  try { localStorage.setItem('monika.sort', sortBy); } catch (e) { /* ignore */ }
+  if (isAiMode()) {
+    if (!aiBusy && hits.length) { sortHitsClient(hits); sel = 0; render(); }
+  } else {
     doSearch();
   }
 });
