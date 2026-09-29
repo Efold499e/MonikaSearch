@@ -573,12 +573,14 @@ impl Engine {
     }
 
     pub fn search(&self, q: &SearchQuery) -> Vec<Hit> {
-        let text = q.text.to_lowercase();
+        // 斜杠归一化：用户常粘贴正斜杠路径（D:/foo/bar，资源管理器/网页复制），
+        // 索引统一存反斜杠，不归一必然 0 命中；文件名本身不允许含 /，无副作用
+        let text = q.text.to_lowercase().replace('/', "\\");
         let exts: Vec<String> = q.exts.iter().map(|e| e.trim_start_matches('.').to_lowercase()).collect();
         let path_prefix_lower = q
             .path_prefix
             .as_ref()
-            .map(|p| p.trim().to_lowercase())
+            .map(|p| p.trim().replace('/', "\\").to_lowercase())
             .filter(|p| !p.is_empty());
         // 被限定范围的根目录自身（前缀去掉尾部反斜杠）也算候选：
         // 右键某个文件夹搜索时，文件夹自己应能被文件名命中
@@ -589,7 +591,7 @@ impl Engine {
         let path_contains_lower = q
             .path_contains
             .as_ref()
-            .map(|p| p.trim().to_lowercase())
+            .map(|p| p.trim().replace('/', "\\").to_lowercase())
             .filter(|p| !p.is_empty());
         let cutoff = q.modified_within_days.map(|d| {
             std::time::SystemTime::now()
@@ -928,6 +930,32 @@ mod tests {
         });
         let names2: Vec<&str> = oldest.iter().map(|h| h.name.as_str()).collect();
         assert_eq!(names2, vec!["Docs", "file2.txt", "file10.txt", "File1.txt"]);
+    }
+
+    #[test]
+    fn forward_slash_paths_match() {
+        let eg = test_engine();
+        // 粘贴正斜杠完整路径（网页/跨平台复制常见）应能命中
+        let hits = eg.search(&q("c:/docs/report.txt"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "C:\\Docs\\report.txt");
+
+        // path_prefix / path_contains 同样归一化
+        let scoped = eg.search(&SearchQuery {
+            text: String::new(),
+            path_prefix: Some("c:/docs/".into()),
+            ..Default::default()
+        });
+        let paths: Vec<&str> = scoped.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["C:\\Docs", "C:\\Docs\\report.txt"]);
+
+        let contains = eg.search(&SearchQuery {
+            text: String::new(),
+            path_contains: Some("docs_backup".into()),
+            ..Default::default()
+        });
+        assert_eq!(contains.len(), 1);
+        assert_eq!(contains[0].path, "C:\\docs_backup\\notes.md");
     }
 
     #[test]
